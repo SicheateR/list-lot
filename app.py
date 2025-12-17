@@ -70,80 +70,90 @@ def save_to_google_sheets(dataframe, sheet_name=None):
 # ==========================================
 
 def process_image_spatial(image_file):
-    # 1. Load Gambar
+    # 1. Load & Resize Gambar (Agar Cepat)
     pil_image = Image.open(image_file).convert("RGB")
     img_array = np.array(pil_image)
     
-    # Buat salinan gambar untuk digambar kotak-kotak (Debug Visual)
+    height, width = img_array.shape[:2]
+    max_width = 1200
+    if width > max_width:
+        scale_ratio = max_width / width
+        new_height = int(height * scale_ratio)
+        img_array = cv2.resize(img_array, (max_width, new_height), interpolation=cv2.INTER_AREA)
+    
     debug_image = img_array.copy()
     
-    # 2. Baca SEMUA teks dan posisinya
-    # Format result: [ [[x1,y1],[x2,y2]..], "teks", confidence ]
+    # 2. Baca Teks
     results = reader.readtext(img_array)
     
     active_columns = []
     captured_data = []
-
-    # --- TAHAP A: CARI HEADER (JANGKAR) ---
+    
+    # --- STRATEGI 1: SPATIAL (Cari Header Kolom) ---
+    # Cocok untuk supplier yang punya tabel rapi (Lot No, Batch, dll)
+    target_headers = ["lot", "roll", "batch", "no.", "number", "id", "code"]
+    
     for (bbox, text, prob) in results:
         clean_text = text.lower().strip()
-        
-        # Cek apakah teks ini adalah Header yang dicari?
-        if any(h in clean_text for h in TARGET_HEADERS):
-            # Ambil koordinat
+        if any(h in clean_text for h in target_headers):
             (tl, tr, br, bl) = bbox
-            x_min = min(tl[0], bl[0])
-            x_max = max(tr[0], br[0])
-            y_max = max(tr[1], br[1]) # Bagian bawah header
-            
-            # Simpan area kolom ini
             active_columns.append({
-                'x_min': x_min,
-                'x_max': x_max,
-                'y_start': y_max,
+                'x_min': min(tl[0], bl[0]),
+                'x_max': max(tr[0], br[0]),
+                'y_start': max(tr[1], br[1]), # Bagian bawah header
                 'text': text
             })
-            
-            # GAMBAR KOTAK HIJAU DI HEADER (Visualisasi)
+            # Visualisasi Header (Hijau)
             cv2.rectangle(debug_image, (int(tl[0]), int(tl[1])), (int(br[0]), int(br[1])), (0, 255, 0), 3)
-            cv2.putText(debug_image, "HEADER", (int(tl[0]), int(tl[1]-10)), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-    # Jika tidak ada header, stop
-    if not active_columns:
-        return [], debug_image, "Tidak ditemukan tulisan Lot/Roll/Batch sebagai patokan."
+    # --- STRATEGI 2: REGEX SPESIFIK (Untuk SP8N & Format Bandel) ---
+    # Format SP8N: 13 digit angka, kadang ada huruf A di belakang (3082504120078A)
+    # Kita cari ini DI MANA SAJA (tidak peduli kolom)
+    regex_sp8n = re.compile(r'\b\d{13}[A-Z]?\b')
 
-    # --- TAHAP B: CARI DATA DI BAWAH HEADER ---
     for (bbox, text, prob) in results:
-        # Hitung titik tengah teks ini
         (tl, tr, br, bl) = bbox
-        data_x_center = (tl[0] + tr[0]) / 2
-        data_y_top = min(tl[1], tr[1])
         
-        # Cek ke setiap kolom yang aktif
-        for col in active_columns:
-            # Syarat 1: Posisi HARUS di bawah header
-            if data_y_top > col['y_start']:
-                
-                # Syarat 2: Posisi HARUS sejajar vertikal (dengan toleransi margin melebar dikit)
-                margin = 100 # Pixel toleransi kiri-kanan
-                if (col['x_min'] - margin) < data_x_center < (col['x_max'] + margin):
-                    
-                    # Syarat 3: Filter Sampah
-                    # Bukan header itu sendiri & panjang karakter masuk akal
-                    if text not in [c['text'] for c in active_columns] and len(text) > 3:
-                        
-                        # Filter Kata Terlarang (Blacklist) agar 'Total'/'Weight' tidak masuk
-                        blacklist = ["TOTAL", "WEIGHT", "KG", "MM", "DATE", "QTY", "NET"]
-                        if not any(b in text.upper() for b in blacklist):
-                            
-                            captured_data.append(text)
-                            
-                            # GAMBAR KOTAK BIRU DI DATA (Visualisasi)
-                            cv2.rectangle(debug_image, (int(tl[0]), int(tl[1])), (int(br[0]), int(br[1])), (255, 0, 0), 2)
+        # Bersihkan teks untuk pengecekan
+        clean_val = text.replace(" ", "").strip().upper()
+        is_captured = False
+        
+        # CEK 1: Apakah ini format SP8N (13 digit)?
+        if regex_sp8n.search(clean_val):
+            captured_data.append(text)
+            is_captured = True
+            # Visualisasi Data SP8N (Ungu - Biar beda)
+            cv2.rectangle(debug_image, (int(tl[0]), int(tl[1])), (int(br[0]), int(br[1])), (255, 0, 255), 3)
+            
+        # CEK 2: Jika bukan SP8N, apakah dia ada di bawah kolom "Lot"?
+        elif active_columns: 
+            data_x_center = (tl[0] + tr[0]) / 2
+            data_y_top = min(tl[1], tr[1])
+            
+            for col in active_columns:
+                if data_y_top > col['y_start']:
+                    # Margin toleransi
+                    margin = 60 
+                    if (col['x_min'] - margin) < data_x_center < (col['x_max'] + margin):
+                        # Filter sampah
+                        if text not in [c['text'] for c in active_columns] and len(text) > 2:
+                            blacklist = ["TOTAL", "WEIGHT", "KG", "MM", "DATE", "QTY", "NET", "ROLLS", "MIC"]
+                            if not any(b in clean_val for b in blacklist):
+                                captured_data.append(text)
+                                is_captured = True
+                                # Visualisasi Data Kolom (Biru)
+                                cv2.rectangle(debug_image, (int(tl[0]), int(tl[1])), (int(br[0]), int(br[1])), (255, 0, 0), 2)
+                                break # Sudah ketemu kolomnya, lanjut teks berikutnya
 
-    return captured_data, debug_image, "OK"
+    # --- FINAL CHECK ---
+    # Hapus duplikat jika ada data yang terbaca double
+    captured_data = list(dict.fromkeys(captured_data))
 
+    if captured_data:
+        return captured_data, debug_image, "OK"
+    else:
+        return [], debug_image, "Tidak ditemukan data Lot (Kolom) maupun 13 Digit."
+        
 # ==========================================
 # 3. USER INTERFACE (STREAMLIT)
 # ==========================================
