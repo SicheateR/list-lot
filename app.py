@@ -6,6 +6,7 @@ import cv2
 from PIL import Image
 import gspread
 import time
+import re
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
