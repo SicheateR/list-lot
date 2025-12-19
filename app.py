@@ -134,7 +134,7 @@ def process_image_spatial(image_file):
             for col in active_columns:
                 if data_y_top > col['y_start']:
                     # Margin toleransi
-                    margin = 150
+                    margin = 120
                     if (col['x_min'] - margin) < data_x_center < (col['x_max'] + margin):
                         # Filter sampah
                         if text not in [c['text'] for c in active_columns] and len(text) > 2:
